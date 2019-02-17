@@ -1,0 +1,190 @@
+pragma solidity >=0.4.10;
+
+contract InsuranceFactory {
+    Insurance[] private deployedInsurances;
+    
+    function createInsurance(uint contractDuration) public payable {
+        Insurance i = new Insurance(contractDuration, msg.sender);
+        deployedInsurances.push(i);
+    }
+    
+    function getDeployedInsurances() public view returns (Insurance[] memory) {
+        return deployedInsurances;
+    }
+}
+
+contract Insurance {
+    struct RequestLock {
+        string description;
+        bool requested;
+        bool complete;
+        uint approvalCount;
+        mapping(address => bool) approvals;
+    }
+    
+    address private ADMIN_ADDRESS = 0x5A9F75d0899787dD6787E5F697236256a4F2B783;
+    
+    address private insured; // people who hold this contract
+    uint private premium; // amount of moeny that insured should pay
+    // -1: unKnown, 0: claimable for contributors, 1: claimable for insured
+    int private status = -1;
+    bool private isLocked = false; // whether this contract is locked
+    address payable[] private contributorList;
+    mapping(address => uint) private contributors;
+    mapping(address => bool) private claimers;
+    address payable[] private claimerList;
+    RequestLock private requestLock; // insured's request to lock the contract
+    uint private contractDuration; // how long this contract will keep open
+    uint private contractStartTime; 
+    
+    modifier onGoingOnly() {
+        require(!checkLockByDuration());
+        require(status == -1);
+        require(!isLocked);
+        _;
+    }
+    
+    modifier completedOnly() {
+        require(status != -1);
+        require(isLocked);
+        _;
+    }
+    
+    modifier validPay() {
+        require(msg.sender.balance >= msg.value);
+        // avoid contribute overflow
+        require(msg.sender.balance <= premium * 2);
+        _;
+    }
+    
+    constructor(uint duration, address creator) public {
+        require(duration > 0);
+        
+        contractDuration = duration;
+        contractStartTime = block.timestamp;
+        insured = creator;
+        claimers[creator] = true;
+    }
+    
+    function premiumCharge() public payable {
+        require(msg.sender == insured);
+        require(msg.value > 0);
+        
+        premium = msg.value;
+    }
+    
+    function contribute() public onGoingOnly validPay payable {
+        require(msg.value > 0);
+        // should not be insured
+        require(msg.sender != insured);
+        require(premium > 0);
+        
+        isLocked = msg.sender.balance >= premium * 2;
+        
+        contributors[msg.sender] = msg.value;
+        claimers[msg.sender] = true;
+        contributorList.push(msg.sender);
+    }
+    
+    function claim() public completedOnly payable {
+        require(status != -1);
+        require(isLocked);
+      
+        require(msg.sender == insured || contributors[msg.sender] > 0);
+        
+        if(status == 1 && msg.sender == insured) {
+            msg.sender.transfer(address(this).balance);
+        } else if(status == 0 && msg.sender != insured) {
+            msg.sender.transfer(contributors[msg.sender] * 2);
+        }
+        
+        claimers[msg.sender] = false;
+        claimerList.push(msg.sender);
+    }
+    
+    
+    function createRequestLock(string memory description) public onGoingOnly {
+        require(msg.sender == insured);
+        require(!requestLock.requested);
+        
+        requestLock = RequestLock({
+            description: description,
+            requested: true,
+            complete: false,
+            approvalCount: 0
+        });
+    }
+    
+    function approveRequest() public onGoingOnly {
+        require(requestLock.requested);
+        require(!requestLock.complete);
+        
+        require(contributors[msg.sender] > 0);
+        require(!requestLock.approvals[msg.sender]);
+        
+        requestLock.approvals[msg.sender] = true;
+        requestLock.approvalCount++;
+        
+        if(requestLock.approvalCount > contributorList.length / 2) {
+            isLocked = true;
+            requestLock.complete = true;
+        }
+    }
+    
+    function setStatus(int s) public {
+        require(msg.sender == ADMIN_ADDRESS);
+        require(status == -1);
+        require(checkLockByDuration());
+        
+        status = s;
+    }
+    
+    function cancelContract() public payable {
+        require(msg.sender == insured);
+        
+        if(contributorList.length == 0 || msg.sender.balance > 0) {
+            msg.sender.transfer(msg.sender.balance);
+        }
+        
+        _finalizeState();
+    }
+    
+    function checkLockByDuration() public returns(bool) {
+        if(block.timestamp - contractStartTime >= contractDuration) {
+            _finalizeState();
+        }
+        return isLocked;
+    }
+    
+    function _finalizeState() private {
+        isLocked = true;
+            
+        if(requestLock.requested && !requestLock.complete) {
+            requestLock.complete = true;
+        }
+    }
+    
+    function isClaimable(address caller) public view returns(bool) {
+        return isLocked && status != -1 && claimers[caller] && 
+        ((caller!= insured && status == 0) || (caller == insured && status == 1));
+    }
+    
+   /* function getSummary() public view returns (
+        address, uint, uint, int, bool, address[] memory, address[] memory, uint, uint
+    ) {
+        return (
+            insured,
+            premium,
+            address(this).balance,
+            status,
+            isLocked,
+            contributorList,
+            claimerList,
+            contractStartTime,
+            contractDuration
+);
+    }*/
+}
+
+
+
